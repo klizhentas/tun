@@ -5,10 +5,8 @@ import (
 	"context"
 	"io"
 	"log/slog"
-	"math/rand"
 	"net"
 	"net/netip"
-	"os"
 	"time"
 
 	"gvisor.dev/gvisor/pkg/buffer"
@@ -29,15 +27,6 @@ import (
 )
 
 func main() {
-	fd, err := openDevSystem("")
-	if err != nil {
-		slog.Error("Failed to open system device: %v", err)
-		os.Exit(-1)
-	}
-	defer fd.Close()
-	slog.Info("Opened device: %v", fd.Name())
-
-	rand.Seed(time.Now().UnixNano())
 
 	// Create the stack with ipv4 and tcp protocols, then add a tun-based
 	// NIC and ipv4 address.
@@ -48,7 +37,7 @@ func main() {
 
 	mtu := 1500
 
-	slog.Info("Metrics: MTU: %s", mtu)
+	slog.Info("Metrics: MTU", "mtu", mtu)
 
 	dev, err := tun.CreateTUN("utun5", mtu)
 	if err != nil {
@@ -59,7 +48,7 @@ func main() {
 	if err != nil {
 		slog.Error("Failed to get device name: %s", err)
 	}
-	slog.Info("created tun device: %s", devName)
+	slog.Info("created tun device", "name", devName)
 
 	const nicID = 1
 
@@ -245,10 +234,6 @@ func forwardTunnelToEndpoint(tun tun.Device, dstEndpoint *channel.Endpoint) erro
 			packetBuf := stack.NewPacketBuffer(stack.PacketBufferOptions{
 				Payload: buffer.MakeWithData(bytes.Clone(buffers[i])),
 			})
-			/*if !parse.IPv4(packetBuf) {
-				slog.Error("Failed to parse packets")
-			}*/
-			slog.Info("endpoint is not attached?", slog.Bool("attached", dstEndpoint.IsAttached()))
 			dstEndpoint.InjectInbound(header.IPv4ProtocolNumber, packetBuf)
 			slog.Info("sent one packet to dstEndpoint")
 			packetBuf.DecRef()

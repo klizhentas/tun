@@ -3,8 +3,6 @@ module github.com/klizhentas/tun
 go 1.21.1
 
 require (
-	github.com/google/gopacket v1.1.19
-	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8
 	github.com/tailscale/wireguard-go v0.0.0-20231121184858-cc193a0b3272
 	gvisor.dev/gvisor v0.0.0-20230928000133-4fe30062272c
 )
