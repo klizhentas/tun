@@ -28,4 +28,4 @@ run: tun
 
 .PHONY: tunup
 tunup:
-	ifconfig utun4 10.1.0.30 10.1.0.40 up
+	ifconfig utun5 10.1.0.30 10.1.0.40 up
