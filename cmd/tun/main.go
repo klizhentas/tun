@@ -1,3 +1,6 @@
+// Lots of code and samples taken from here:
+// https://github.com/tailscale/tailscale/blob/main/wgengine/netstack/netstack.go#L202
+// Copyright, etc, etc, etc.
 package main
 
 import (
@@ -57,6 +60,10 @@ func main() {
 		slog.Error("can't create nic: %v", err)
 		return
 	}
+	// Comment taken from here:
+	//
+	// https://github.com/tailscale/tailscale/blob/main/wgengine/netstack/netstack.go#L202
+	//
 	// By default the netstack NIC will only accept packets for the IPs
 	// registered to it. Since in some cases we dynamically register IPs
 	// based on the packets that arrive, the NIC needs to accept all
