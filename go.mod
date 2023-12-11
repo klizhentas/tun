@@ -3,7 +3,7 @@ module github.com/klizhentas/tun
 go 1.21.1
 
 require (
-	github.com/tailscale/wireguard-go v0.0.0-20231121184858-cc193a0b3272
+	golang.zx2c4.com/wireguard v0.0.0-20231211153847-12269c276173
 	gvisor.dev/gvisor v0.0.0-20230928000133-4fe30062272c
 )
 
