@@ -28,4 +28,5 @@ run: tun
 
 .PHONY: tunup
 tunup:
-	ifconfig utun5 10.1.0.30 10.1.0.40 up
+	ifconfig utun5 10.1.0.1 10.1.0.1 up
+	route add -net 10.1.0.0/24 -interface utun5
