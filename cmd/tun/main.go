@@ -10,7 +10,9 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
-	"time"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -30,6 +32,8 @@ import (
 )
 
 func main() {
+	procCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	// Create the stack with ipv4 and tcp protocols, then add a tun-based
 	// NIC and ipv4 address.
@@ -38,20 +42,21 @@ func main() {
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4, icmp.NewProtocol6},
 	})
 
+	// TODO: There is got to be a syscall that tells MTU?
 	mtu := 1500
 
-	slog.Info("Metrics: MTU", "mtu", mtu)
+	slog.Info("Setting up TUN device with parameters", slog.Int("mtu", mtu))
 
 	dev, err := tun.CreateTUN("utun5", mtu)
 	if err != nil {
-		slog.Error("Failed to create tun device: %v", err)
+		slog.Error("Failed to create tun device", slog.String("err", err.Error()))
 		return
 	}
 	devName, err := dev.Name()
 	if err != nil {
-		slog.Error("Failed to get device name: %s", err)
+		slog.Error("Failed to get device name.", slog.String("err", err.Error()))
 	}
-	slog.Info("created tun device", "name", devName)
+	slog.Info("Created tun device.", "name", devName)
 
 	const nicID = 1
 
@@ -95,7 +100,7 @@ func main() {
 	const maxInFlightConnectionAttempts = 1024
 	tcpForwarder := tcp.NewForwarder(ustack, 0, 1024, func(req *tcp.ForwarderRequest) {
 		reqID := req.ID()
-		slog.Info("got forward request", "src", fromNetstackIP(reqID.RemoteAddress), "dst", fromNetstackIP(reqID.LocalAddress))
+		slog.Info("Fot TCP forward request.", slog.String("src", fromNetstackIP(reqID.RemoteAddress).String()), slog.String("dst", fromNetstackIP(reqID.LocalAddress).String()))
 		dstIP := reqID.LocalAddress
 		// Add address as route dynamically (has to be concurrent in the future)
 		pa := tcpip.ProtocolAddress{
@@ -113,24 +118,22 @@ func main() {
 		var wq waiter.Queue
 		endpoint, err := req.CreateEndpoint(&wq)
 		if err != nil {
-			slog.Error("Failed to create endpoint: %v", err)
+			slog.Error("Failed to create endpoint.", slog.String("err", err.String()))
 			req.Complete(false)
 			return
 		}
-		slog.Info("req ID before", "req", reqID)
 		req.Complete(true)
 		endpoint.SocketOptions().SetKeepAlive(true)
 		// lots of useful comments here:
 		// https://github.com/tailscale/tailscale/blob/main/wgengine/netstack/netstack.go#L890
 		client := gonet.NewTCPConn(&wq, endpoint)
 		defer client.Close()
-		slog.Info("Req: ", "req", reqID)
 		srcIP := fromNetstackIP(reqID.RemoteAddress)
 		// For now let's forward everything to localhost but on the same port
 		dstAddr := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(reqID.LocalPort))
-		slog.Info("Forward", slog.String("src", srcIP.String()), slog.String("dst", dstAddr.String()))
+		slog.Info("Forwarding.", slog.String("src", srcIP.String()), slog.String("dst", dstAddr.String()))
 
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(procCtx)
 		defer cancel()
 
 		waitEntry, notifyCh := waiter.NewChannelEntry(waiter.EventHUp) // TODO(bradfitz): right EventMask?
@@ -143,7 +146,7 @@ func main() {
 		go func() {
 			select {
 			case <-notifyCh:
-				slog.Info("netstack forwardTCP notified, canceling context for %s", dstAddr)
+				slog.Info("Netstack forwardTCP notified, canceling context for.", slog.String("dst", dstAddr.String()))
 			case <-done:
 			}
 			cancel()
@@ -153,7 +156,7 @@ func main() {
 		var dialer net.Dialer
 		server, dialerr := dialer.DialContext(ctx, "tcp", dstAddr.String())
 		if dialerr != nil {
-			slog.Info("could not connect to local server", "dst", dstAddr.String(), "err", dialerr)
+			slog.Info("Could not connect to local server.", slog.String("dst", dstAddr.String()), slog.String("err", dialerr.Error()))
 			return
 		}
 		defer server.Close()
@@ -169,37 +172,43 @@ func main() {
 		}()
 		dialerr = <-connClosed
 		if err != nil {
-			slog.Info("proxy connection closed with error", "err", err)
+			slog.Error("Proxy connection closed with error.", slog.String("err", err.String()))
 		}
-		slog.Info("forwarder connection to %s closed", dstAddr)
+		slog.Info("Forwarder connection closed.", slog.String("dst", dstAddr.String()))
 		return
-
 	})
-	ctx := context.Background()
 
 	ustack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpForwarder.HandlePacket)
-	go forwardTunnelToEndpoint(dev, linkEP)
-	go forwardEndpointToTunnel(ctx, linkEP, dev)
+	go forwardTunnelToEndpoint(procCtx, dev, linkEP)
+	go forwardEndpointToTunnel(procCtx, linkEP, dev)
+
+	statsC := make(chan os.Signal, 1)
+	signal.Notify(statsC, syscall.SIGUSR1)
 	go func() {
 		for {
-			<-time.NewTicker(10 * time.Second).C
-			stats := ustack.Stats()
-			slog.Info("TCP stats:",
-				"ip-malformed-packets-received", stats.IP.MalformedPacketsReceived,
-				"total-packets-received-bytes", stats.NICs.Rx.Bytes,
-				"total-packets-received-count", stats.NICs.Rx.Packets,
-			)
+			select {
+			case <-procCtx.Done():
+				return
+			case <-statsC:
+				stats := ustack.Stats()
+				slog.Info("Got USR1, printing TCP stats",
+					"ip-malformed-packets-received", stats.IP.MalformedPacketsReceived,
+					"total-packets-received-bytes", stats.NICs.Rx.Bytes,
+					"total-packets-received-count", stats.NICs.Rx.Packets,
+				)
+			}
+
 		}
 	}()
 
-	time.Sleep(10000 * time.Second)
+	<-procCtx.Done()
+	slog.Info("Got exit singal. Shutting down.")
 }
 
 func forwardEndpointToTunnel(ctx context.Context, endpoint *channel.Endpoint, tun tun.Device) {
 	for {
 		packet := endpoint.ReadContext(ctx)
 		if packet.IsNil() {
-			slog.Warn("got nil packet")
 			continue
 		}
 		buf := packet.ToBuffer()
@@ -207,17 +216,15 @@ func forwardEndpointToTunnel(ctx context.Context, endpoint *channel.Endpoint, tu
 		const writeOffset = device.MessageTransportHeaderSize
 		moreBytes := make([]byte, writeOffset, len(bytes)+writeOffset)
 		moreBytes = append(moreBytes[:writeOffset], bytes...)
-		slog.Info("Forwarding packet to endpoint", "packet-size", len(moreBytes))
 
 		if _, err := tun.Write([][]byte{moreBytes}, writeOffset); err != nil {
 			slog.Error("failed to inject inbound", slog.String("err", err.Error()))
 			return
 		}
-		slog.Info("forwarded one packet to tunnel")
 	}
 }
 
-func forwardTunnelToEndpoint(tun tun.Device, dstEndpoint *channel.Endpoint) error {
+func forwardTunnelToEndpoint(ctx context.Context, tun tun.Device, dstEndpoint *channel.Endpoint) error {
 	buffers := make([][]byte, tun.BatchSize())
 	for i := range buffers {
 		buffers[i] = make([]byte, device.MaxMessageSize)
@@ -229,20 +236,17 @@ func forwardTunnelToEndpoint(tun tun.Device, dstEndpoint *channel.Endpoint) erro
 			buffers[i] = buffers[i][:cap(buffers[i])]
 		}
 		n, err := tun.Read(buffers, sizes, readOffset)
-		slog.Info("read packets", "count", n)
 		if err != nil {
 			slog.Error("Failed to read from tun", "err", err)
 			return err
 		}
 		for i := range sizes[:n] {
 			buffers[i] = buffers[i][readOffset : readOffset+sizes[i]]
-			slog.Info("Buffer size", "len", len(buffers[i]), "size", sizes[i], "readOffset", readOffset)
 			// ready to send data to channel
 			packetBuf := stack.NewPacketBuffer(stack.PacketBufferOptions{
 				Payload: buffer.MakeWithData(bytes.Clone(buffers[i])),
 			})
 			dstEndpoint.InjectInbound(header.IPv4ProtocolNumber, packetBuf)
-			slog.Info("sent one packet to dstEndpoint")
 			packetBuf.DecRef()
 		}
 	}
